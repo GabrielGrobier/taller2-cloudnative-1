@@ -1,0 +1,88 @@
+name: Build, Push and Deploy
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  APP_NAME: ms-secucloud
+  IMAGE_NAME: ${{ secrets.DOCKERHUB_USERNAME }}/ms-secucloud
+  CONTAINER_PORT: 8080
+
+jobs:
+  build-push-deploy:
+    name: Build, push Docker image and deploy to EC2
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+
+      - name: Build and test with Maven
+        run: mvn -B clean test
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to DockerHub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.IMAGE_NAME }}:latest
+            ${{ env.IMAGE_NAME }}:${{ github.sha }}
+
+      - name: Configure AWS lab credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Validate AWS credentials
+        run: aws sts get-caller-identity
+
+      - name: Deploy container on EC2
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          APP_NAME: ${{ env.APP_NAME }}
+          IMAGE_NAME: ${{ env.IMAGE_NAME }}
+          IMAGE_TAG: ${{ github.sha }}
+          CONTAINER_PORT: ${{ env.CONTAINER_PORT }}
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          port: 22
+          envs: APP_NAME,IMAGE_NAME,IMAGE_TAG,CONTAINER_PORT,DOCKERHUB_USERNAME,DOCKERHUB_TOKEN
+          script: |
+            set -e
+            echo "$DOCKERHUB_TOKEN" | docker login -u "$DOCKERHUB_USERNAME" --password-stdin
+            docker pull "$IMAGE_NAME:$IMAGE_TAG"
+            docker stop "$APP_NAME" || true
+            docker rm "$APP_NAME" || true
+            docker run -d --name "$APP_NAME" --restart unless-stopped -p "$CONTAINER_PORT:$CONTAINER_PORT" "$IMAGE_NAME:$IMAGE_TAG"
+            docker image prune -f
