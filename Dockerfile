@@ -1,4 +1,4 @@
-# Etapa 1: compilar con Maven
+# Etapa 1: compilar con Maven 2026
 FROM eclipse-temurin:21-jdk AS buildstage
 
 RUN apt-get update && apt-get install -y maven
